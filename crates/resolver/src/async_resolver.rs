@@ -119,7 +119,7 @@ impl TokioAsyncResolver {
     /// documentation for `AsyncResolver` for more information on how to use
     /// the background future.
     pub fn tokio(config: ResolverConfig, options: ResolverOpts) -> Result<Self, ResolveError> {
-        Self::new(config, options, TokioRuntimeProvider::new())
+        Self::new(config, options, TokioRuntimeProvider::new(), None)
     }
 
     /// Constructs a new Tokio based Resolver with the system configuration.
@@ -156,8 +156,9 @@ impl<R: RuntimeProvider> AsyncResolver<R> {
         config: ResolverConfig,
         options: ResolverOpts,
         provider: R,
+        cache: Option<DnsLru>,
     ) -> Result<Self, ResolveError> {
-        Self::new_with_conn(config, options, provider)
+        Self::new_with_conn(config, options, provider, cache)
     }
 
     /// Constructs a new Resolver with the system configuration.
@@ -200,6 +201,7 @@ impl<P: RuntimeProvider> AsyncResolver<P> {
         config: ResolverConfig,
         options: ResolverOpts,
         conn_provider: P,
+        cache: Option<DnsLru>,
     ) -> Result<Self, ResolveError> {
         let pool =
             AbstractNameServerPool::from_config_with_provider(&config, &options, conn_provider);
@@ -229,7 +231,10 @@ impl<P: RuntimeProvider> AsyncResolver<P> {
         };
 
         trace!("handle passed back");
-        let lru = DnsLru::new(options.cache_size, dns_lru::TtlConfig::from_opts(&options));
+        let lru = match cache {
+            Some(dns_lru) => dns_lru,
+            None => DnsLru::new(options.cache_size, dns_lru::TtlConfig::from_opts(&options)),
+        };
         Ok(Self {
             config,
             options,
@@ -249,7 +254,7 @@ impl<P: RuntimeProvider> AsyncResolver<P> {
     )]
     pub fn from_system_conf_with_provider(conn_provider: P) -> Result<Self, ResolveError> {
         let (config, options) = super::system_conf::read_system_conf()?;
-        Self::new_with_conn(config, options, conn_provider)
+        Self::new_with_conn(config, options, conn_provider, None)
     }
 
     /// Per request options based on the ResolverOpts
