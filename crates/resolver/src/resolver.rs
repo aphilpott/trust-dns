@@ -80,7 +80,7 @@ impl Resolver {
         builder.enable_all();
 
         let runtime = builder.build()?;
-        let async_resolver = AsyncResolver::new(config, options, TokioRuntimeProvider::new(), None)
+        let async_resolver = AsyncResolver::new(config, options, TokioRuntimeProvider::new())
             .expect("failed to create resolver");
 
         Ok(Self {

@@ -119,7 +119,7 @@ impl TokioAsyncResolver {
     /// documentation for `AsyncResolver` for more information on how to use
     /// the background future.
     pub fn tokio(config: ResolverConfig, options: ResolverOpts) -> Result<Self, ResolveError> {
-        Self::new(config, options, TokioRuntimeProvider::new(), None)
+        Self::new(config, options, TokioRuntimeProvider::new())
     }
 
     /// Constructs a new Tokio based Resolver with the system configuration.
@@ -133,6 +133,86 @@ impl TokioAsyncResolver {
     )]
     pub fn tokio_from_system_conf() -> Result<Self, ResolveError> {
         Self::from_system_conf(TokioRuntimeProvider::new())
+    }
+}
+
+pub struct AsyncResolverBuilder<P: RuntimeProvider> {
+    config: ResolverConfig,
+    options: ResolverOpts,
+    conn_provider: P,
+    /// DNS cache to use instead of the default one created as part of creating
+    /// the AsyncResolver.
+    cache: Option<DnsLru>,
+}
+
+impl<R: RuntimeProvider> AsyncResolverBuilder<R> {
+    pub fn new(
+        config: ResolverConfig,
+        options: ResolverOpts,
+        conn_provider: R,
+    ) -> AsyncResolverBuilder<R> {
+        Self {
+            config,
+            options,
+            conn_provider,
+            cache: None,
+        }
+    }
+
+    pub fn with_cache(mut self, cache: DnsLru) -> AsyncResolverBuilder<R> {
+        self.cache = Some(cache);
+        self
+    }
+
+    pub fn build(self) -> Result<AsyncResolver<R>, ResolveError> {
+        let pool = AbstractNameServerPool::from_config_with_provider(
+            &self.config,
+            &self.options,
+            self.conn_provider,
+        );
+        let either;
+        let client = RetryDnsHandle::new(pool, self.options.attempts);
+        if self.options.validate {
+            #[cfg(feature = "dnssec")]
+            {
+                use proto::xfer::DnssecDnsHandle;
+                either = LookupEither::Secure(DnssecDnsHandle::new(client));
+            }
+
+            #[cfg(not(feature = "dnssec"))]
+            {
+                // TODO: should this just be a panic, or a pinned error?
+                tracing::warn!("validate option is only available with 'dnssec' feature");
+                either = LookupEither::Retry(client);
+            }
+        } else {
+            either = LookupEither::Retry(client);
+        }
+
+        let hosts = if self.options.use_hosts_file {
+            Some(Arc::new(Hosts::new()))
+        } else {
+            None
+        };
+
+        trace!("handle passed back");
+        let lru = match self.cache {
+            Some(dns_lru) => dns_lru,
+            None => DnsLru::new(
+                self.options.cache_size,
+                dns_lru::TtlConfig::from_opts(&self.options),
+            ),
+        };
+        Ok(AsyncResolver {
+            config: self.config,
+            options: self.options,
+            client_cache: CachingClient::with_cache(
+                lru,
+                either,
+                self.options.preserve_intermediates,
+            ),
+            hosts,
+        })
     }
 }
 
@@ -156,9 +236,8 @@ impl<R: RuntimeProvider> AsyncResolver<R> {
         config: ResolverConfig,
         options: ResolverOpts,
         provider: R,
-        cache: Option<DnsLru>,
     ) -> Result<Self, ResolveError> {
-        Self::new_with_conn(config, options, provider, cache)
+        Self::new_with_conn(config, options, provider)
     }
 
     /// Constructs a new Resolver with the system configuration.
@@ -201,46 +280,8 @@ impl<P: RuntimeProvider> AsyncResolver<P> {
         config: ResolverConfig,
         options: ResolverOpts,
         conn_provider: P,
-        cache: Option<DnsLru>,
     ) -> Result<Self, ResolveError> {
-        let pool =
-            AbstractNameServerPool::from_config_with_provider(&config, &options, conn_provider);
-        let either;
-        let client = RetryDnsHandle::new(pool, options.attempts);
-        if options.validate {
-            #[cfg(feature = "dnssec")]
-            {
-                use proto::xfer::DnssecDnsHandle;
-                either = LookupEither::Secure(DnssecDnsHandle::new(client));
-            }
-
-            #[cfg(not(feature = "dnssec"))]
-            {
-                // TODO: should this just be a panic, or a pinned error?
-                tracing::warn!("validate option is only available with 'dnssec' feature");
-                either = LookupEither::Retry(client);
-            }
-        } else {
-            either = LookupEither::Retry(client);
-        }
-
-        let hosts = if options.use_hosts_file {
-            Some(Arc::new(Hosts::new()))
-        } else {
-            None
-        };
-
-        trace!("handle passed back");
-        let lru = match cache {
-            Some(dns_lru) => dns_lru,
-            None => DnsLru::new(options.cache_size, dns_lru::TtlConfig::from_opts(&options)),
-        };
-        Ok(Self {
-            config,
-            options,
-            client_cache: CachingClient::with_cache(lru, either, options.preserve_intermediates),
-            hosts,
-        })
+        AsyncResolverBuilder::new(config, options, conn_provider).build()
     }
 
     /// Constructs a new Resolver with the system configuration.
@@ -254,7 +295,7 @@ impl<P: RuntimeProvider> AsyncResolver<P> {
     )]
     pub fn from_system_conf_with_provider(conn_provider: P) -> Result<Self, ResolveError> {
         let (config, options) = super::system_conf::read_system_conf()?;
-        Self::new_with_conn(config, options, conn_provider, None)
+        Self::new_with_conn(config, options, conn_provider)
     }
 
     /// Per request options based on the ResolverOpts
